@@ -1,0 +1,110 @@
+name: pdfrender
+
+on:
+  push:
+    paths:
+      - '.github/workflows/pdfrender.yml'
+      - 'utils/pdfrender*'
+      - 'utils/PdfRenderBundle*'
+      - 'examples/pdfrender*'
+      - 'poppler/**'
+      - 'CMakeLists.txt'
+      - 'utils/CMakeLists.txt'
+  pull_request:
+    paths:
+      - '.github/workflows/pdfrender.yml'
+      - 'utils/pdfrender*'
+      - 'utils/PdfRenderBundle*'
+      - 'examples/pdfrender*'
+      - 'poppler/**'
+      - 'CMakeLists.txt'
+      - 'utils/CMakeLists.txt'
+  workflow_dispatch:
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.22
+      - name: Install dependencies
+        run: >-
+          sudo apt-get update && sudo apt-get install -y
+          cmake ninja-build g++ libcairo2-dev libfontconfig1-dev libfreetype-dev
+          libjpeg-dev libwebp-dev libzstd-dev zlib1g-dev
+      - name: Configure
+        run: >-
+          cmake -S . -B build -G Ninja
+          -DENABLE_CPP=OFF -DENABLE_GLIB=OFF -DENABLE_QT5=OFF -DENABLE_QT6=OFF
+          -DENABLE_BOOST=OFF -DENABLE_LIBOPENJPEG=OFF -DENABLE_LIBJPEG=OFF
+          -DENABLE_LCMS=OFF -DENABLE_LIBCURL=OFF -DENABLE_LIBTIFF=OFF
+          -DENABLE_NSS3=OFF -DENABLE_GPGME=OFF -DBUILD_SHARED_LIBS=OFF
+          -DBUILD_CPP_TESTS=OFF -DBUILD_MANUAL_TESTS=OFF
+      - name: Build pdfrender
+        run: cmake --build build --target pdfrender
+      - name: Smoke test bundle and Node parser
+        shell: bash
+        run: |
+          node examples/make-pdfrender-smoke-pdf.mjs sample.pdf
+          build/utils/pdfrender --webp-quality 80 sample.pdf sample.pdrb
+          node examples/pdfrender-bundle-parser.mjs sample.pdrb webroot
+          test -s webroot/index.html
+          test -s webroot/pdfrender.js
+          node --check webroot/pdfrender.js
+          test -s webroot/pages/0001.svg
+          grep -q '<object class="background"' webroot/pages/0001.html
+          test -n "$(find webroot/assets -type f -name '*.webp' -print -quit)"
+          test -z "$(find webroot/assets -type f \( -name '*.png' -o -name '*.jpg' -o -name '*.jpeg' \) -print -quit)"
+          ! grep -R 'data:image/' webroot
+          ! grep -q '>A<' webroot/pages/0001.html
+
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.22
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-cairo
+            mingw-w64-ucrt-x86_64-freetype
+            mingw-w64-ucrt-x86_64-libjpeg-turbo
+            mingw-w64-ucrt-x86_64-libwebp
+            mingw-w64-ucrt-x86_64-zlib
+            mingw-w64-ucrt-x86_64-zstd
+      - name: Configure
+        run: >-
+          cmake -S . -B build -G Ninja -DFONT_CONFIGURATION=win32
+          -DENABLE_CPP=OFF -DENABLE_GLIB=OFF -DENABLE_QT5=OFF -DENABLE_QT6=OFF
+          -DENABLE_BOOST=OFF -DENABLE_LIBOPENJPEG=OFF -DENABLE_LIBJPEG=OFF
+          -DENABLE_LCMS=OFF -DENABLE_LIBCURL=OFF -DENABLE_LIBTIFF=OFF
+          -DENABLE_NSS3=OFF -DENABLE_GPGME=OFF -DBUILD_SHARED_LIBS=OFF
+          -DBUILD_CPP_TESTS=OFF -DBUILD_MANUAL_TESTS=OFF
+      - name: Build pdfrender
+        run: cmake --build build --target pdfrender
+      - name: Run pdfrender
+        run: |
+          node examples/make-pdfrender-smoke-pdf.mjs sample.pdf
+          build/utils/pdfrender.exe --webp-quality 80 sample.pdf sample.pdrb
+          node examples/pdfrender-bundle-parser.mjs sample.pdrb webroot
+          test -s webroot/index.html
+          test -s webroot/pdfrender.js
+          node --check webroot/pdfrender.js
+          test -s webroot/pages/0001.svg
+          grep -q '<object class="background"' webroot/pages/0001.html
+          test -n "$(find webroot/assets -type f -name '*.webp' -print -quit)"
+          test -z "$(find webroot/assets -type f \( -name '*.png' -o -name '*.jpg' -o -name '*.jpeg' \) -print -quit)"
+          ! grep -R 'data:image/' webroot
+          ! grep -q '>A<' webroot/pages/0001.html

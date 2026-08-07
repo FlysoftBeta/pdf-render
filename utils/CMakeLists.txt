@@ -49,6 +49,32 @@ if (HAVE_CAIRO)
   endif()
   install(TARGETS pdftocairo DESTINATION bin)
   install(FILES pdftocairo.1 DESTINATION ${CMAKE_INSTALL_MANDIR}/man1)
+
+  # pdfrender: content-addressed HTML/SVG bundle output. Keep zstd local to
+  # this utility rather than making it a dependency of libpoppler.
+  find_path(PDFRENDER_ZSTD_INCLUDE_DIR NAMES zstd.h)
+  find_library(PDFRENDER_ZSTD_LIBRARY NAMES zstd zstd_static libzstd libzstd_static)
+  find_path(PDFRENDER_WEBP_INCLUDE_DIR NAMES webp/encode.h)
+  find_library(PDFRENDER_WEBP_LIBRARY NAMES webp libwebp)
+  find_path(PDFRENDER_JPEG_INCLUDE_DIR NAMES jpeglib.h)
+  find_library(PDFRENDER_JPEG_LIBRARY NAMES jpeg libjpeg)
+  if(PDFRENDER_ZSTD_INCLUDE_DIR AND PDFRENDER_ZSTD_LIBRARY AND PDFRENDER_WEBP_INCLUDE_DIR AND PDFRENDER_WEBP_LIBRARY AND PDFRENDER_JPEG_INCLUDE_DIR AND PDFRENDER_JPEG_LIBRARY)
+    set(pdfrender_SOURCES
+      pdfrender.cc
+      PdfRenderBundle.cc
+      PdfRenderBundle.h
+      ${CMAKE_SOURCE_DIR}/poppler/CairoFontEngine.cc
+      ${CMAKE_SOURCE_DIR}/poppler/CairoOutputDev.cc
+      ${CMAKE_SOURCE_DIR}/poppler/CairoRescaleBox.cc
+    )
+    add_executable(pdfrender ${pdfrender_SOURCES})
+    target_compile_options(pdfrender PRIVATE ${CAIRO_CFLAGS})
+    target_include_directories(pdfrender SYSTEM PRIVATE ${CAIRO_INCLUDE_DIRS} ${PDFRENDER_ZSTD_INCLUDE_DIR} ${PDFRENDER_WEBP_INCLUDE_DIR} ${PDFRENDER_JPEG_INCLUDE_DIR})
+    target_link_libraries(pdfrender PRIVATE ${CAIRO_LIBRARIES} ${PDFRENDER_ZSTD_LIBRARY} ${PDFRENDER_WEBP_LIBRARY} ${PDFRENDER_JPEG_LIBRARY} Freetype::Freetype ${common_libs})
+    install(TARGETS pdfrender DESTINATION bin)
+  else()
+    message(STATUS "pdfrender disabled: zstd, WebP, or JPEG development files were not found")
+  endif()
 endif ()
 
 # pdfdetach
