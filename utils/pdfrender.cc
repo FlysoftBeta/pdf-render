@@ -3,7 +3,6 @@
 #include "config.h"
 
 #include "PdfRenderBundle.h"
-#include "Win32Console.h"
 #include "goo/GooString.h"
 #include "GlobalParams.h"
 #include "PDFDoc.h"
@@ -34,6 +33,10 @@
 #include <string>
 #include <string_view>
 #include <vector>
+
+// Win32Console.h remaps stdio functions with macros. Include it only after
+// headers that may declare methods with those names (notably Stream::printf).
+#include "Win32Console.h"
 
 namespace {
 

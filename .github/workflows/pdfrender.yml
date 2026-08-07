@@ -59,6 +59,23 @@ jobs:
           test -z "$(find webroot/assets -type f \( -name '*.png' -o -name '*.jpg' -o -name '*.jpeg' \) -print -quit)"
           ! grep -R 'data:image/' webroot
           ! grep -q '>A<' webroot/pages/0001.html
+      - name: Package pdfrender
+        run: |
+          package=pdfrender-linux-x86_64
+          mkdir -p "dist/$package"
+          install -m 0755 build/utils/pdfrender "dist/$package/"
+          install -m 0644 \
+            examples/pdfrender-bundle-parser.mjs \
+            utils/pdfrender-format.md \
+            COPYING COPYING3 \
+            "dist/$package/"
+          tar -C dist -czf "dist/$package.tar.gz" "$package"
+      - name: Upload pdfrender artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: pdfrender-linux-x86_64
+          path: dist/pdfrender-linux-x86_64.tar.gz
+          if-no-files-found: error
 
   windows:
     runs-on: windows-latest
@@ -108,3 +125,28 @@ jobs:
           test -z "$(find webroot/assets -type f \( -name '*.png' -o -name '*.jpg' -o -name '*.jpeg' \) -print -quit)"
           ! grep -R 'data:image/' webroot
           ! grep -q '>A<' webroot/pages/0001.html
+      - name: Package pdfrender
+        run: |
+          package=pdfrender-windows-x86_64
+          mkdir -p "dist/$package"
+          cp build/utils/pdfrender.exe "dist/$package/"
+          ldd build/utils/pdfrender.exe \
+            | awk '$3 ~ /^\/ucrt64\/bin\// { print $3 }' \
+            > dist/runtime-dlls.txt
+          test -s dist/runtime-dlls.txt
+          while IFS= read -r dll; do
+            cp "$dll" "dist/$package/"
+          done < dist/runtime-dlls.txt
+          cp \
+            examples/pdfrender-bundle-parser.mjs \
+            utils/pdfrender-format.md \
+            COPYING COPYING3 \
+            "dist/$package/"
+          cd dist
+          cmake -E tar cf "$package.zip" --format=zip "$package"
+      - name: Upload pdfrender artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: pdfrender-windows-x86_64
+          path: dist/pdfrender-windows-x86_64.zip
+          if-no-files-found: error
