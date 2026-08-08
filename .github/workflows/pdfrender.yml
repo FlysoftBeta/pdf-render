@@ -3,22 +3,22 @@ name: pdfrender
 on:
   push:
     paths:
-      - '.github/workflows/pdfrender.yml'
-      - 'utils/pdfrender*'
-      - 'utils/PdfRenderBundle*'
-      - 'examples/pdfrender*'
-      - 'poppler/**'
-      - 'CMakeLists.txt'
-      - 'utils/CMakeLists.txt'
+      - ".github/workflows/pdfrender.yml"
+      - "utils/pdfrender*"
+      - "utils/PdfRenderBundle*"
+      - "examples/pdfrender*"
+      - "poppler/**"
+      - "CMakeLists.txt"
+      - "utils/CMakeLists.txt"
   pull_request:
     paths:
-      - '.github/workflows/pdfrender.yml'
-      - 'utils/pdfrender*'
-      - 'utils/PdfRenderBundle*'
-      - 'examples/pdfrender*'
-      - 'poppler/**'
-      - 'CMakeLists.txt'
-      - 'utils/CMakeLists.txt'
+      - ".github/workflows/pdfrender.yml"
+      - "utils/pdfrender*"
+      - "utils/PdfRenderBundle*"
+      - "examples/pdfrender*"
+      - "poppler/**"
+      - "CMakeLists.txt"
+      - "utils/CMakeLists.txt"
   workflow_dispatch:
 
 jobs:

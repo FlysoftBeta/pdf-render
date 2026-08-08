@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <csetjmp>
 #include <cctype>
 #include <cmath>
@@ -28,10 +29,13 @@
 #include <iomanip>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <thread>
+#include <unordered_map>
 #include <vector>
 
 // Win32Console.h remaps stdio functions with macros. Include it only after
@@ -48,6 +52,7 @@ struct Options
     int lastPage = 0;
     double resolution = 96.0;
     double webpQuality = 80.0;
+    int jobs = 0;
     std::optional<GooString> ownerPassword;
     std::optional<GooString> userPassword;
 };
@@ -96,6 +101,7 @@ void usage(const char *program)
               << "  -l, --last-page N      last page (default: end)\n"
               << "  -r, --resolution DPI   CSS/SVG resolution (default: 96)\n"
               << "  -q, --webp-quality Q   WebP quality, 0-100 (default: 80)\n"
+              << "  -j, --jobs N           worker threads, 1-256 (default: CPU count)\n"
               << "  --owner-password PASS  PDF owner password\n"
               << "  --user-password PASS   PDF user password\n"
               << "  -h, --help             show this help\n";
@@ -161,6 +167,12 @@ bool parseOptions(int argc, char **argv, Options *options)
             const char *value = requireValue(argv[i]);
             if (!value || !parseDouble(value, 0, 100, &options->webpQuality)) {
                 std::cerr << "WebP quality must be between 0 and 100\n";
+                return false;
+            }
+        } else if (arg == "-j" || arg == "--jobs") {
+            const char *value = requireValue(argv[i]);
+            if (!value || !parseInteger(value, &options->jobs) || options->jobs > 256) {
+                std::cerr << "worker thread count must be between 1 and 256\n";
                 return false;
             }
         } else if (arg == "--owner-password" || arg == "--user-password") {
@@ -419,7 +431,14 @@ bool convertToWebp(std::string_view mime, std::string_view encoded, double quali
     return true;
 }
 
-bool extractDataUris(std::string *svg, PdfRenderBundle *bundle, double webpQuality, std::string *error)
+struct ExtractedAsset
+{
+    std::string token;
+    std::string mime;
+    std::vector<unsigned char> data;
+};
+
+bool extractDataUris(std::string *svg, int page, std::vector<ExtractedAsset> *assets, double webpQuality, std::string *error)
 {
     std::size_t search = 0;
     while ((search = svg->find("data:", search)) != std::string::npos) {
@@ -456,13 +475,11 @@ bool extractDataUris(std::string *svg, PdfRenderBundle *bundle, double webpQuali
         } else {
             bytes.assign(decoded.begin(), decoded.end());
         }
-        // First add obtains the content id; adding the canonical path then
-        // creates the file mapping without duplicating the blob.
-        const std::string id = bundle->addFile({}, outputMime, bytes);
-        bundle->addFile("assets/" + id + "." + extensionForMime(outputMime), outputMime, std::move(bytes));
-        const std::string replacement = id + "\" data-pdfrender-ref=\"" + id + "\" data-pdfrender-mime=\"" + outputMime;
+        const std::string token = "__pdfrender_page_" + std::to_string(page) + "_asset_" + std::to_string(assets->size()) + "__";
+        const std::string replacement = token + "\" data-pdfrender-ref=\"" + token + "\" data-pdfrender-mime=\"" + outputMime;
         svg->replace(search, endQuote - search, replacement);
         search += replacement.size();
+        assets->push_back({ token, std::move(outputMime), std::move(bytes) });
     }
     return true;
 }
@@ -499,7 +516,7 @@ bool renderSvg(PDFDoc *doc, BackgroundOutputDev *output, int page, double resolu
     return true;
 }
 
-std::string makePageHtml(PDFDoc *doc, int page, double resolution, std::string_view cssId, std::string_view scriptId, std::string_view svgId)
+std::string makePageHtml(PDFDoc *doc, int page, double resolution, std::string_view cssId, std::string_view scriptId, std::string_view svg)
 {
     HtmlTextOutputDev textOutput;
     doc->displayPage(&textOutput, page, resolution, resolution, 0, true, false, false);
@@ -515,7 +532,7 @@ std::string makePageHtml(PDFDoc *doc, int page, double resolution, std::string_v
          << "<link rel=\"stylesheet\" href=\"" << cssId << "\" data-pdfrender-ref=\"" << cssId << "\" data-pdfrender-mime=\"text/css\">"
          << "<script defer src=\"" << scriptId << "\" data-pdfrender-ref=\"" << scriptId << "\" data-pdfrender-mime=\"text/javascript\"></script>"
          << "</head><body><main class=\"page\" style=\"width:" << width << "px;height:" << height << "px\">"
-         << "<object class=\"background\" type=\"image/svg+xml\" aria-hidden=\"true\" data=\"" << svgId << "\" data-pdfrender-ref=\"" << svgId << "\" data-pdfrender-mime=\"image/svg+xml\"></object>"
+         << "<div class=\"background\" aria-hidden=\"true\">" << svg << "</div>"
          << "<div class=\"text-layer\" aria-label=\"PDF text\">";
     for (const TextWord *word : words->getWords()) {
         const std::unique_ptr<std::string> text = word->getText();
@@ -543,9 +560,97 @@ std::string pagePath(int page, std::string_view extension)
     return path.str();
 }
 
-constexpr std::string_view styleSheet = R"CSS(*{box-sizing:border-box}html,body{margin:0;background:#555}.page{position:relative;overflow:hidden;background:#fff}.background,.text-layer{position:absolute;inset:0;width:100%;height:100%}.background{display:block;pointer-events:none}.text-layer{pointer-events:none}.word{position:absolute;display:block;white-space:pre;line-height:1;transform-origin:0 0;transform:rotate(var(--rotation,0deg)) scaleX(var(--fit-x,1));pointer-events:auto;user-select:text}.f-sans{font-family:Arial,"Helvetica Neue",sans-serif}.f-serif{font-family:"Times New Roman",Times,serif}.f-mono{font-family:Consolas,"Liberation Mono",monospace}.fw-bold{font-weight:700}.fs-italic{font-style:italic}body.bundle-index{padding:1rem}.bundle-index iframe{display:block;margin:0 auto 1rem;border:0;background:#fff;box-shadow:0 2px 10px #222})CSS";
+void normalizeSvgIds(std::string *svg, int page)
+{
+    std::unordered_map<std::string, std::string> ids;
+    std::size_t search = 0;
+    while ((search = svg->find("id=\"", search)) != std::string::npos) {
+        const std::size_t value = search + 4;
+        const std::size_t end = svg->find('"', value);
+        if (end == std::string::npos) {
+            break;
+        }
+        const std::string oldId = svg->substr(value, end - value);
+        ids.try_emplace(oldId, "pdfrender-p" + std::to_string(page) + '-' + std::to_string(ids.size()));
+        search = end + 1;
+    }
+
+    std::string normalized;
+    normalized.reserve(svg->size());
+    for (std::size_t position = 0; position < svg->size();) {
+        if (svg->compare(position, 4, "id=\"") == 0) {
+            const std::size_t value = position + 4;
+            const std::size_t end = svg->find('"', value);
+            if (end != std::string::npos) {
+                const auto replacement = ids.find(svg->substr(value, end - value));
+                if (replacement != ids.end()) {
+                    normalized += "id=\"" + replacement->second + '"';
+                    position = end + 1;
+                    continue;
+                }
+            }
+        } else if ((*svg)[position] == '#') {
+            const std::size_t end = svg->find_first_of("\"') \t\r\n", position + 1);
+            const std::size_t length = (end == std::string::npos ? svg->size() : end) - position - 1;
+            const auto replacement = ids.find(svg->substr(position + 1, length));
+            if (replacement != ids.end()) {
+                normalized += '#' + replacement->second;
+                position += length + 1;
+                continue;
+            }
+        }
+        normalized += (*svg)[position++];
+    }
+    *svg = std::move(normalized);
+}
+
+constexpr std::string_view styleSheet = R"CSS(*{box-sizing:border-box}html,body{margin:0;background:#555}.page{position:relative;overflow:hidden;background:#fff}.background,.text-layer{position:absolute;inset:0;width:100%;height:100%}.background{display:block;pointer-events:none}.background>svg{display:block;width:100%;height:100%}.text-layer{pointer-events:none}.word{position:absolute;display:block;white-space:pre;line-height:1;transform-origin:0 0;transform:rotate(var(--rotation,0deg)) scaleX(var(--fit-x,1));pointer-events:auto;user-select:text}.f-sans{font-family:Arial,"Helvetica Neue",sans-serif}.f-serif{font-family:"Times New Roman",Times,serif}.f-mono{font-family:Consolas,"Liberation Mono",monospace}.fw-bold{font-weight:700}.fs-italic{font-style:italic}body.bundle-index{padding:1rem}.bundle-index iframe{display:block;margin:0 auto 1rem;border:0;background:#fff;box-shadow:0 2px 10px #222})CSS";
 
 constexpr std::string_view fitScript = R"JS((()=>{const fit=()=>{for(const word of document.querySelectorAll('.word')){const target=Number.parseFloat(word.style.width);if(!(target>0)||!word.textContent||word.textContent.length<2)continue;word.style.transform='none';const range=document.createRange();range.selectNodeContents(word);const natural=range.getBoundingClientRect().width;word.style.removeProperty('transform');if(natural>0){const ratio=Math.max(.5,Math.min(2,target/natural));word.style.setProperty('--fit-x',String(ratio))}}};if(document.fonts&&document.fonts.ready){document.fonts.ready.then(fit)}else if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',fit,{once:true})}else{fit()}})();)JS";
+
+struct PageResult
+{
+    std::string html;
+    std::vector<ExtractedAsset> assets;
+    std::string error;
+};
+
+bool renderPage(PDFDoc *document, BackgroundOutputDev *background, int page, const Options &options, std::string_view cssId, std::string_view scriptId, PageResult *result)
+{
+    std::string svg;
+    if (!renderSvg(document, background, page, options.resolution, &svg, &result->error) || !extractDataUris(&svg, page, &result->assets, options.webpQuality, &result->error)) {
+        return false;
+    }
+    const std::size_t root = svg.find("<svg");
+    if (root == std::string::npos) {
+        result->error = "Cairo output does not contain an SVG root element";
+        return false;
+    }
+    svg.erase(0, root);
+    normalizeSvgIds(&svg, page);
+    result->html = makePageHtml(document, page, options.resolution, cssId, scriptId, svg);
+    return true;
+}
+
+void replaceAll(std::string *value, std::string_view from, std::string_view to)
+{
+    std::size_t position = 0;
+    while ((position = value->find(from, position)) != std::string::npos) {
+        value->replace(position, from.size(), to);
+        position += to.size();
+    }
+}
+
+void materializeAssets(PageResult *page, PdfRenderBundle *bundle)
+{
+    for (auto &asset : page->assets) {
+        // First add obtains the content id; adding the canonical path then
+        // creates the file mapping without duplicating the blob.
+        const std::string id = bundle->addFile({}, asset.mime, asset.data);
+        bundle->addFile("assets/" + id + "." + extensionForMime(asset.mime), asset.mime, std::move(asset.data));
+        replaceAll(&page->html, asset.token, id);
+    }
+}
 
 } // namespace
 
@@ -581,19 +686,64 @@ int main(int argc, char **argv)
     PdfRenderBundle bundle;
     const std::string cssId = bundle.addText("style.css", "text/css", std::string(styleSheet));
     const std::string scriptId = bundle.addText("pdfrender.js", "text/javascript", std::string(fitScript));
-    BackgroundOutputDev background;
-    background.startDoc(document.get());
+    const int resultCount = last - first + 1;
+    const unsigned int detectedThreads = std::clamp(std::thread::hardware_concurrency(), 1u, 256u);
+    const int requestedThreads = options.jobs == 0 ? static_cast<int>(detectedThreads) : options.jobs;
+    const int workerCount = std::min(resultCount, requestedThreads);
+    std::vector<PageResult> results(resultCount);
+    std::atomic<int> nextResult { 0 };
+    std::atomic<bool> failed { false };
+    std::mutex failureMutex;
+    std::string workerFailure;
+
+    auto worker = [&] {
+        const GooString workerInput(options.input);
+        std::unique_ptr<PDFDoc> workerDocument = PDFDocFactory().createPDFDoc(workerInput, options.ownerPassword, options.userPassword);
+        if (!workerDocument || !workerDocument->isOk()) {
+            std::scoped_lock lock(failureMutex);
+            if (workerFailure.empty()) {
+                workerFailure = "cannot open PDF in worker thread";
+            }
+            failed = true;
+            return;
+        }
+        BackgroundOutputDev background;
+        background.startDoc(workerDocument.get());
+        while (!failed.load(std::memory_order_relaxed)) {
+            const int resultIndex = nextResult.fetch_add(1, std::memory_order_relaxed);
+            if (resultIndex >= resultCount) {
+                break;
+            }
+            const int page = first + resultIndex;
+            if (!renderPage(workerDocument.get(), &background, page, options, cssId, scriptId, &results[resultIndex])) {
+                std::scoped_lock lock(failureMutex);
+                if (workerFailure.empty()) {
+                    workerFailure = "page " + std::to_string(page) + ": " + results[resultIndex].error;
+                }
+                failed = true;
+                break;
+            }
+        }
+    };
+
+    {
+        std::vector<std::jthread> workers;
+        workers.reserve(workerCount);
+        for (int i = 0; i < workerCount; ++i) {
+            workers.emplace_back(worker);
+        }
+    }
+    if (failed) {
+        std::cerr << workerFailure << '\n';
+        return 1;
+    }
+
     std::vector<std::pair<int, std::string>> pages;
     std::string error;
-    for (int page = first; page <= last; ++page) {
-        std::string svg;
-        if (!renderSvg(document.get(), &background, page, options.resolution, &svg, &error) || !extractDataUris(&svg, &bundle, options.webpQuality, &error)) {
-            std::cerr << "page " << page << ": " << error << '\n';
-            return 1;
-        }
-        const std::string svgId = bundle.addText(pagePath(page, ".svg"), "image/svg+xml", std::move(svg));
-        const std::string html = makePageHtml(document.get(), page, options.resolution, cssId, scriptId, svgId);
-        const std::string htmlId = bundle.addText(pagePath(page, ".html"), "text/html", html);
+    for (int resultIndex = 0; resultIndex < resultCount; ++resultIndex) {
+        const int page = first + resultIndex;
+        materializeAssets(&results[resultIndex], &bundle);
+        const std::string htmlId = bundle.addText(pagePath(page, ".html"), "text/html", std::move(results[resultIndex].html));
         pages.emplace_back(page, htmlId);
     }
 
@@ -615,6 +765,6 @@ int main(int argc, char **argv)
         std::cerr << error << '\n';
         return 1;
     }
-    std::cout << "wrote " << options.output << " (pages " << first << '-' << last << ")\n";
+    std::cout << "wrote " << options.output << " (pages " << first << '-' << last << ", threads " << workerCount << ")\n";
     return 0;
 }
