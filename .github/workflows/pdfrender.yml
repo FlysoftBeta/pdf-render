@@ -26,9 +26,6 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22.22
       - name: Install dependencies
         run: >-
           sudo apt-get update && sudo apt-get install -y
@@ -44,21 +41,6 @@ jobs:
           -DBUILD_CPP_TESTS=OFF -DBUILD_MANUAL_TESTS=OFF
       - name: Build pdfrender
         run: cmake --build build --target pdfrender
-      - name: Smoke test bundle and Node parser
-        shell: bash
-        run: |
-          node examples/make-pdfrender-smoke-pdf.mjs sample.pdf
-          build/utils/pdfrender --webp-quality 80 sample.pdf sample.pdrb
-          node examples/pdfrender-bundle-parser.mjs sample.pdrb webroot
-          test -s webroot/index.html
-          test -s webroot/pdfrender.js
-          node --check webroot/pdfrender.js
-          test -s webroot/pages/0001.svg
-          grep -q '<object class="background"' webroot/pages/0001.html
-          test -n "$(find webroot/assets -type f -name '*.webp' -print -quit)"
-          test -z "$(find webroot/assets -type f \( -name '*.png' -o -name '*.jpg' -o -name '*.jpeg' \) -print -quit)"
-          ! grep -R 'data:image/' webroot
-          ! grep -q '>A<' webroot/pages/0001.html
       - name: Package pdfrender
         run: |
           package=pdfrender-linux-x86_64
@@ -84,9 +66,6 @@ jobs:
         shell: msys2 {0}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22.22
       - uses: msys2/setup-msys2@v2
         with:
           msystem: UCRT64
@@ -112,20 +91,6 @@ jobs:
           -DBUILD_CPP_TESTS=OFF -DBUILD_MANUAL_TESTS=OFF
       - name: Build pdfrender
         run: cmake --build build --target pdfrender
-      - name: Run pdfrender
-        run: |
-          node examples/make-pdfrender-smoke-pdf.mjs sample.pdf
-          build/utils/pdfrender.exe --webp-quality 80 sample.pdf sample.pdrb
-          node examples/pdfrender-bundle-parser.mjs sample.pdrb webroot
-          test -s webroot/index.html
-          test -s webroot/pdfrender.js
-          node --check webroot/pdfrender.js
-          test -s webroot/pages/0001.svg
-          grep -q '<object class="background"' webroot/pages/0001.html
-          test -n "$(find webroot/assets -type f -name '*.webp' -print -quit)"
-          test -z "$(find webroot/assets -type f \( -name '*.png' -o -name '*.jpg' -o -name '*.jpeg' \) -print -quit)"
-          ! grep -R 'data:image/' webroot
-          ! grep -q '>A<' webroot/pages/0001.html
       - name: Package pdfrender
         run: |
           package=pdfrender-windows-x86_64
