@@ -476,7 +476,7 @@ bool extractDataUris(std::string *svg, int page, std::vector<ExtractedAsset> *as
             bytes.assign(decoded.begin(), decoded.end());
         }
         const std::string token = "__pdfrender_page_" + std::to_string(page) + "_asset_" + std::to_string(assets->size()) + "__";
-        const std::string replacement = token + "\" data-pdfrender-ref=\"" + token + "\" data-pdfrender-mime=\"" + outputMime;
+        const std::string replacement = token + "\" data-bundle-ref=\"" + token + "\" data-bundle-mime=\"" + outputMime;
         svg->replace(search, endQuote - search, replacement);
         search += replacement.size();
         assets->push_back({ token, std::move(outputMime), std::move(bytes) });
@@ -529,8 +529,8 @@ std::string makePageHtml(PDFDoc *doc, int page, double resolution, std::string_v
     html << std::fixed << std::setprecision(3);
     html << "<!doctype html><html><head><meta charset=\"utf-8\">"
          << "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-         << "<link rel=\"stylesheet\" href=\"" << cssId << "\" data-pdfrender-ref=\"" << cssId << "\" data-pdfrender-mime=\"text/css\">"
-         << "<script defer src=\"" << scriptId << "\" data-pdfrender-ref=\"" << scriptId << "\" data-pdfrender-mime=\"text/javascript\"></script>"
+         << "<link rel=\"stylesheet\" href=\"" << cssId << "\" data-bundle-ref=\"" << cssId << "\" data-bundle-mime=\"text/css\">"
+         << "<script defer src=\"" << scriptId << "\" data-bundle-ref=\"" << scriptId << "\" data-bundle-mime=\"text/javascript\"></script>"
          << "</head><body><main class=\"page\" style=\"width:" << width << "px;height:" << height << "px\">"
          << "<div class=\"background\" aria-hidden=\"true\">" << svg << "</div>"
          << "<div class=\"text-layer\" aria-label=\"PDF text\">";
@@ -641,15 +641,20 @@ void replaceAll(std::string *value, std::string_view from, std::string_view to)
     }
 }
 
-void materializeAssets(PageResult *page, PdfRenderBundle *bundle)
+std::vector<std::string> materializeAssets(PageResult *page, PdfRenderBundle *bundle)
 {
+    std::vector<std::string> ids;
+    ids.reserve(page->assets.size());
     for (auto &asset : page->assets) {
         // First add obtains the content id; adding the canonical path then
-        // creates the file mapping without duplicating the blob.
-        const std::string id = bundle->addFile({}, asset.mime, asset.data);
-        bundle->addFile("assets/" + id + "." + extensionForMime(asset.mime), asset.mime, std::move(asset.data));
+        const std::string id = bundle->addFile({}, asset.mime, std::move(asset.data));
+        if (id.empty() || !bundle->addPath("assets/" + id + "." + extensionForMime(asset.mime), id)) {
+            return {};
+        }
         replaceAll(&page->html, asset.token, id);
+        ids.push_back(id);
     }
+    return ids;
 }
 
 } // namespace
@@ -686,14 +691,27 @@ int main(int argc, char **argv)
     PdfRenderBundle bundle;
     const std::string cssId = bundle.addText("style.css", "text/css", std::string(styleSheet));
     const std::string scriptId = bundle.addText("pdfrender.js", "text/javascript", std::string(fitScript));
+    if (cssId.empty() || scriptId.empty()) {
+        std::cerr << "cannot spool shared render resources\n";
+        return 1;
+    }
     const int resultCount = last - first + 1;
     const unsigned int detectedThreads = std::clamp(std::thread::hardware_concurrency(), 1u, 256u);
     const int requestedThreads = options.jobs == 0 ? static_cast<int>(detectedThreads) : options.jobs;
     const int workerCount = std::min(resultCount, requestedThreads);
-    std::vector<PageResult> results(resultCount);
+    struct ManifestPage
+    {
+        int page = 0;
+        int width = 0;
+        int height = 0;
+        std::string htmlId;
+        std::vector<std::string> dependencies;
+    };
+    std::vector<ManifestPage> pages(resultCount);
     std::atomic<int> nextResult { 0 };
     std::atomic<bool> failed { false };
     std::mutex failureMutex;
+    std::mutex bundleMutex;
     std::string workerFailure;
 
     auto worker = [&] {
@@ -715,14 +733,30 @@ int main(int argc, char **argv)
                 break;
             }
             const int page = first + resultIndex;
-            if (!renderPage(workerDocument.get(), &background, page, options, cssId, scriptId, &results[resultIndex])) {
+            PageResult result;
+            if (!renderPage(workerDocument.get(), &background, page, options, cssId, scriptId, &result)) {
                 std::scoped_lock lock(failureMutex);
                 if (workerFailure.empty()) {
-                    workerFailure = "page " + std::to_string(page) + ": " + results[resultIndex].error;
+                    workerFailure = "page " + std::to_string(page) + ": " + result.error;
                 }
                 failed = true;
                 break;
             }
+            std::scoped_lock bundleLock(bundleMutex);
+            const std::size_t assetCount = result.assets.size();
+            std::vector<std::string> dependencies = materializeAssets(&result, &bundle);
+            const std::string htmlId = dependencies.size() == assetCount ? bundle.addText(pagePath(page, ".html"), "text/html", std::move(result.html)) : std::string {};
+            if (htmlId.empty()) {
+                std::scoped_lock lock(failureMutex);
+                if (workerFailure.empty()) {
+                    workerFailure = "page " + std::to_string(page) + ": cannot spool render resources";
+                }
+                failed = true;
+                break;
+            }
+            const int width = static_cast<int>(std::ceil(workerDocument->getPageMediaWidth(page) * options.resolution / 72.0));
+            const int height = static_cast<int>(std::ceil(workerDocument->getPageMediaHeight(page) * options.resolution / 72.0));
+            pages[resultIndex] = { page, width, height, htmlId, std::move(dependencies) };
         }
     };
 
@@ -738,29 +772,23 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    std::vector<std::pair<int, std::string>> pages;
     std::string error;
-    for (int resultIndex = 0; resultIndex < resultCount; ++resultIndex) {
-        const int page = first + resultIndex;
-        materializeAssets(&results[resultIndex], &bundle);
-        const std::string htmlId = bundle.addText(pagePath(page, ".html"), "text/html", std::move(results[resultIndex].html));
-        pages.emplace_back(page, htmlId);
-    }
-
-    std::ostringstream index;
-    index << "<!doctype html><html><head><meta charset=\"utf-8\"><title>PDF render</title>"
-          << "<link rel=\"stylesheet\" href=\"" << cssId << "\" data-pdfrender-ref=\"" << cssId << "\" data-pdfrender-mime=\"text/css\"></head><body class=\"bundle-index\">";
-    for (const auto &[page, id] : pages) {
-        const int width = static_cast<int>(std::ceil(document->getPageMediaWidth(page) * options.resolution / 72.0));
-        const int height = static_cast<int>(std::ceil(document->getPageMediaHeight(page) * options.resolution / 72.0));
-        index << "<iframe title=\"Page " << page << "\" width=\"" << width << "\" height=\"" << height << "\" src=\"" << id << "\" data-pdfrender-ref=\"" << id << "\" data-pdfrender-mime=\"text/html\"></iframe>";
-    }
-    index << "</body></html>";
-    bundle.addText("index.html", "text/html", index.str());
-
     std::ostringstream manifest;
-    manifest << "{\"format\":\"pdfrender-bundle\",\"version\":1,\"sourcePages\":" << pageCount << ",\"firstPage\":" << first << ",\"lastPage\":" << last << ",\"resolution\":" << options.resolution << ",\"webpQuality\":" << options.webpQuality << "}";
-    bundle.addText("manifest.json", "text/pdfrender+json", manifest.str());
+    manifest << "{\"layout\":\"fixed\",\"sourceMime\":\"application/pdf\",\"sourcePages\":" << pageCount
+             << ",\"firstPage\":" << first << ",\"lastPage\":" << last << ",\"resolution\":" << options.resolution
+             << ",\"webpQuality\":" << options.webpQuality << ",\"shared\":[\"" << cssId << "\",\"" << scriptId << "\"],\"items\":[";
+    for (std::size_t index = 0; index < pages.size(); ++index) {
+        const auto &page = pages[index];
+        if (index) manifest << ',';
+        manifest << "{\"id\":\"page:" << page.page << "\",\"ordinal\":" << index << ",\"width\":" << page.width
+                 << ",\"height\":" << page.height << ",\"document\":\"" << page.htmlId << "\",\"dependencies\":[\"" << cssId << "\",\"" << scriptId << '"';
+        for (const auto &dependency : page.dependencies) {
+            manifest << ",\"" << dependency << '"';
+        }
+        manifest << "]}";
+    }
+    manifest << "]}";
+    bundle.setDocumentManifest(manifest.str());
     if (!bundle.write(options.output, &error)) {
         std::cerr << error << '\n';
         return 1;
