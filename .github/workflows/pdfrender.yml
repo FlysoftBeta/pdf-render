@@ -22,7 +22,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  linux:
+  linux-debian:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
@@ -44,21 +44,62 @@ jobs:
         run: cmake --build build --target pdfrender
       - name: Package pdfrender
         run: |
-          package=pdfrender-linux-x86_64
+          package=pdfrender-linux-debian-x86_64
           mkdir -p "dist/$package"
           install -m 0755 build/utils/pdfrender "dist/$package/"
           strip --strip-unneeded "dist/$package/pdfrender"
           install -m 0644 \
             examples/pdfrender-bundle-parser.mjs \
-            utils/pdfrender-format.md \
+            utils/pdfrender.md \
             COPYING COPYING3 \
             "dist/$package/"
           tar -C dist -czf "dist/$package.tar.gz" "$package"
       - name: Upload pdfrender artifact
         uses: actions/upload-artifact@v6
         with:
-          name: pdfrender-linux-x86_64
-          path: dist/pdfrender-linux-x86_64.tar.gz
+          name: pdfrender-linux-debian-x86_64
+          path: dist/pdfrender-linux-debian-x86_64.tar.gz
+          if-no-files-found: error
+
+  linux-redhat:
+    runs-on: ubuntu-24.04
+    container: fedora:44
+    steps:
+      - name: Install dependencies
+        run: >-
+          dnf install -y
+          git tar gzip coreutils binutils
+          cmake ninja-build gcc-c++ cairo-devel fontconfig-devel freetype-devel
+          libjpeg-turbo-devel libwebp-devel libzstd-devel zlib-ng-compat-devel
+      - uses: actions/checkout@v7
+      - name: Configure
+        run: >-
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DENABLE_CPP=OFF -DENABLE_GLIB=OFF -DENABLE_QT5=OFF -DENABLE_QT6=OFF
+          -DENABLE_BOOST=OFF -DENABLE_LIBOPENJPEG=OFF -DENABLE_LIBJPEG=OFF
+          -DENABLE_LCMS=OFF -DENABLE_LIBCURL=OFF -DENABLE_LIBTIFF=OFF
+          -DENABLE_NSS3=OFF -DENABLE_GPGME=OFF -DBUILD_SHARED_LIBS=OFF
+          -DBUILD_CPP_TESTS=OFF -DBUILD_MANUAL_TESTS=OFF
+      - name: Build pdfrender
+        run: cmake --build build --target pdfrender
+      - name: Package pdfrender
+        run: |
+          package=pdfrender-linux-redhat-x86_64
+          mkdir -p "dist/$package"
+          install -m 0755 build/utils/pdfrender "dist/$package/"
+          strip --strip-unneeded "dist/$package/pdfrender"
+          install -m 0644 \
+            examples/pdfrender-bundle-parser.mjs \
+            utils/pdfrender.md \
+            COPYING COPYING3 \
+            "dist/$package/"
+          tar -C dist -czf "dist/$package.tar.gz" "$package"
+      - name: Upload pdfrender artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: pdfrender-linux-redhat-x86_64
+          path: dist/pdfrender-linux-redhat-x86_64.tar.gz
           if-no-files-found: error
 
   windows:
@@ -109,7 +150,7 @@ jobs:
           done < dist/runtime-dlls.txt
           cp \
             examples/pdfrender-bundle-parser.mjs \
-            utils/pdfrender-format.md \
+            utils/pdfrender.md \
             COPYING COPYING3 \
             "dist/$package/"
           cd dist
