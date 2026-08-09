@@ -5,6 +5,7 @@
 #include "PdfRenderBundle.h"
 #include "goo/GooString.h"
 #include "GlobalParams.h"
+#include "GfxState.h"
 #include "PDFDoc.h"
 #include "PDFDocFactory.h"
 #include "TextOutputDev.h"
@@ -26,6 +27,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <filesystem>
 #include <iomanip>
 #include <iostream>
 #include <memory>
@@ -38,11 +40,77 @@
 #include <unordered_map>
 #include <vector>
 
+#ifdef _WIN32
+#    define WIN32_LEAN_AND_MEAN
+#    define NOMINMAX
+#    include <windows.h>
+#endif
+
 // Win32Console.h remaps stdio functions with macros. Include it only after
 // headers that may declare methods with those names (notably Stream::printf).
 #include "Win32Console.h"
 
 namespace {
+
+enum class MathFontKind
+{
+    none,
+    roman,
+    italic,
+    symbol,
+};
+
+MathFontKind classifyMathFontName(std::string_view value)
+{
+    std::string name(value);
+    std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    const auto contains = [&](std::initializer_list<std::string_view> needles) { return std::any_of(needles.begin(), needles.end(), [&](std::string_view needle) { return name.find(needle) != std::string::npos; }); };
+    if (contains({ "cmsy", "cmex", "msam", "msbm", "mathsymbol", "math-symbol", "mathematicalpi", "mt extra", "wasy", "stmary", "esint" })) {
+        return MathFontKind::symbol;
+    }
+    if (contains({ "cmmi", "cmmib", "mathitalic", "math-italic", "eufm", "rsfs" })) {
+        return MathFontKind::italic;
+    }
+    if (contains({ "cmr", "cmbx", "mathroman", "math-roman", "latinmodernmath", "latin modern math", "stixmath", "stix math", "xits math", "asana math", "cambria math", "libertinus math", "computer modern", "euclid" })) {
+        return MathFontKind::roman;
+    }
+    return MathFontKind::none;
+}
+
+std::filesystem::path executablePath(const char *argv0)
+{
+#ifdef _WIN32
+    std::wstring buffer(32768, L'\0');
+    const DWORD length = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
+    if (length > 0 && length < buffer.size()) {
+        buffer.resize(length);
+        return std::filesystem::path(buffer);
+    }
+#elif defined(__linux__)
+    std::error_code procError;
+    const std::filesystem::path procPath = std::filesystem::read_symlink("/proc/self/exe", procError);
+    if (!procError) {
+        return procPath;
+    }
+#endif
+
+    std::error_code canonicalError;
+    const std::filesystem::path path = std::filesystem::weakly_canonical(std::filesystem::absolute(argv0), canonicalError);
+    return canonicalError ? std::filesystem::absolute(argv0) : path;
+}
+
+std::optional<std::string> bundledPopplerDataDir(const char *argv0)
+{
+    const std::filesystem::path root = executablePath(argv0).parent_path() / "share" / "poppler";
+    for (const char *directory : { "nameToUnicode", "cidToUnicode", "unicodeMap", "cMap" }) {
+        if (!std::filesystem::is_directory(root / directory)) {
+            std::cerr << "bundled poppler-data is incomplete: missing " << (root / directory).string() << '\n';
+            return std::nullopt;
+        }
+    }
+    const std::u8string encoded = root.u8string();
+    return std::string(encoded.begin(), encoded.end());
+}
 
 struct Options
 {
@@ -64,10 +132,36 @@ public:
     // Gfx to interpret those programs so their paths/images remain in the SVG.
     bool interpretType3Chars() override { return true; }
 
-    // Ordinary text is represented by positioned HTML instead.
-    void beginString(GfxState *, const std::string &) override { }
-    void drawChar(GfxState *, double, double, double, double, double, double, CharCode, int, const Unicode *, int) override { }
-    void endString(GfxState *) override { }
+    // Ordinary text is represented by positioned HTML. Math fonts retain
+    // their original PDF glyphs in SVG because radicals, extensible symbols,
+    // and script placement cannot be reproduced reliably with CSS fallback
+    // fonts. A transparent HTML copy remains selectable and searchable.
+    void beginString(GfxState *state, const std::string &text) override
+    {
+        renderMath = false;
+        if (const std::shared_ptr<GfxFont> &font = state->getFont(); font && font->getName()) {
+            renderMath = classifyMathFontName(*font->getName()) != MathFontKind::none;
+        }
+        if (renderMath) {
+            CairoOutputDev::beginString(state, text);
+        }
+    }
+    void drawChar(GfxState *state, double x, double y, double dx, double dy, double originX, double originY, CharCode code, int bytes, const Unicode *unicode, int unicodeLength) override
+    {
+        if (renderMath) {
+            CairoOutputDev::drawChar(state, x, y, dx, dy, originX, originY, code, bytes, unicode, unicodeLength);
+        }
+    }
+    void endString(GfxState *state) override
+    {
+        if (renderMath) {
+            CairoOutputDev::endString(state);
+        }
+        renderMath = false;
+    }
+
+private:
+    bool renderMath = false;
 };
 
 class HtmlTextOutputDev final : public TextOutputDev
@@ -225,6 +319,22 @@ bool containsAny(std::string_view value, std::initializer_list<std::string_view>
     return std::any_of(needles.begin(), needles.end(), [&](std::string_view needle) { return value.find(needle) != std::string_view::npos; });
 }
 
+bool isMathSymbol(Unicode codepoint)
+{
+    return codepoint == 0x00b1 || codepoint == 0x00d7 || codepoint == 0x00f7 || codepoint == 0x2032 || codepoint == 0x2033 || (codepoint >= 0x2070 && codepoint <= 0x209f) || (codepoint >= 0x2190 && codepoint <= 0x22ff)
+            || (codepoint >= 0x27c0 && codepoint <= 0x27ef) || (codepoint >= 0x2980 && codepoint <= 0x2aff);
+}
+
+bool containsMathSymbol(const TextWord *word)
+{
+    for (int i = 0; i < word->getLength(); ++i) {
+        if (isMathSymbol(*word->getChar(i))) {
+            return true;
+        }
+    }
+    return false;
+}
+
 std::string fontClasses(const TextWord *word)
 {
     if (word->getLength() == 0) {
@@ -234,6 +344,26 @@ std::string fontClasses(const TextWord *word)
     std::string name;
     if (const GooString *fontName = font->getFontName()) {
         name = lower(fontName->toStr());
+    }
+    const MathFontKind mathKind = classifyMathFontName(name);
+    const bool mathItalic = mathKind == MathFontKind::italic;
+    const bool mathSymbol = containsMathSymbol(word) || mathKind == MathFontKind::symbol;
+    const bool mathRoman = mathKind == MathFontKind::roman;
+    if (mathItalic || mathSymbol || mathRoman) {
+        std::string classes = mathSymbol ? "f-math-symbol" : "f-math";
+        if (mathKind != MathFontKind::none) {
+            classes += " pdf-glyph";
+        }
+        if (font->isBold() || containsAny(name, { "bold", "black", "heavy", "semibold", "demi", "cmbx", "cmmib" })) {
+            classes += " fw-bold";
+        }
+        // Symbol and extension fonts often advertise an italic flag even for
+        // upright operators, radicals, and delimiters. Only synthesize italic
+        // for fonts that explicitly identify themselves as math italic.
+        if (mathItalic) {
+            classes += " fs-italic";
+        }
+        return classes;
     }
     const bool mono = font->isFixedWidth() || containsAny(name, { "mono", "courier", "consolas", "code" });
     const bool sansByName = containsAny(name, { "sans", "arial", "helvetica", "verdana", "tahoma", "calibri", "gothic" });
@@ -248,6 +378,175 @@ std::string fontClasses(const TextWord *word)
         classes += " fs-italic";
     }
     return classes;
+}
+
+struct PositionedWord
+{
+    const TextWord *word;
+    double x0;
+    double y0;
+    double x1;
+    double y1;
+    double fontSize;
+};
+
+struct TextLineGroup
+{
+    std::vector<PositionedWord> words;
+    double x0 = 0;
+    double y0 = 0;
+    double x1 = 0;
+    double y1 = 0;
+    double centerY = 0;
+    double fontSize = 0;
+};
+
+struct ParagraphGroup
+{
+    std::vector<TextLineGroup> lines;
+    double x0 = 0;
+    double y0 = 0;
+    double x1 = 0;
+    double y1 = 0;
+};
+
+void updateLineGeometry(TextLineGroup *line)
+{
+    line->x0 = line->x1 = line->words.front().x0;
+    line->y0 = line->y1 = line->words.front().y0;
+    double fontSizeSum = 0;
+    double weightedCenterSum = 0;
+    double weightSum = 0;
+    for (const PositionedWord &word : line->words) {
+        line->x0 = std::min(line->x0, word.x0);
+        line->y0 = std::min(line->y0, word.y0);
+        line->x1 = std::max(line->x1, word.x1);
+        line->y1 = std::max(line->y1, word.y1);
+        const double weight = std::max(1.0, word.x1 - word.x0);
+        weightedCenterSum += (word.y0 + word.y1) * 0.5 * weight;
+        weightSum += weight;
+        fontSizeSum += word.fontSize;
+    }
+    line->centerY = weightedCenterSum / weightSum;
+    line->fontSize = fontSizeSum / line->words.size();
+}
+
+std::vector<ParagraphGroup> groupParagraphs(const TextWordList &wordList)
+{
+    std::vector<PositionedWord> positioned;
+    positioned.reserve(wordList.getWords().size());
+    for (const TextWord *word : wordList.getWords()) {
+        const std::unique_ptr<std::string> text = word->getText();
+        if (!text || text->empty()) {
+            continue;
+        }
+        double x0, y0, x1, y1;
+        word->getBBox(&x0, &y0, &x1, &y1);
+        positioned.push_back({ word, x0, y0, x1, y1, word->getFontSize() });
+    }
+    std::sort(positioned.begin(), positioned.end(), [](const PositionedWord &a, const PositionedWord &b) {
+        const double ay = (a.y0 + a.y1) * 0.5;
+        const double by = (b.y0 + b.y1) * 0.5;
+        return ay == by ? a.x0 < b.x0 : ay < by;
+    });
+
+    // PDF text operators have no paragraph concept. First recover visual
+    // lines by assigning each word to the nearest compatible vertical band.
+    // The relaxed center threshold keeps roots, limits, and superscripts on
+    // the same line without joining normal adjacent body lines.
+    std::vector<TextLineGroup> lines;
+    for (const PositionedWord &word : positioned) {
+        const double center = (word.y0 + word.y1) * 0.5;
+        std::size_t best = lines.size();
+        double bestDistance = 1e100;
+        for (std::size_t i = 0; i < lines.size(); ++i) {
+            const double distance = std::abs(center - lines[i].centerY);
+            const double tolerance = std::max(3.0, 0.68 * std::max(word.fontSize, lines[i].fontSize));
+            if (distance <= tolerance && distance < bestDistance) {
+                best = i;
+                bestDistance = distance;
+            }
+        }
+        if (best == lines.size()) {
+            lines.push_back({ { word } });
+            updateLineGeometry(&lines.back());
+        } else {
+            lines[best].words.push_back(word);
+            updateLineGeometry(&lines[best]);
+        }
+    }
+    for (TextLineGroup &line : lines) {
+        std::sort(line.words.begin(), line.words.end(), [](const PositionedWord &a, const PositionedWord &b) { return a.x0 < b.x0; });
+        updateLineGeometry(&line);
+    }
+    std::vector<TextLineGroup> splitLines;
+    for (TextLineGroup &line : lines) {
+        TextLineGroup segment;
+        for (const PositionedWord &word : line.words) {
+            if (!segment.words.empty()) {
+                const double gap = word.x0 - segment.x1;
+                const double splitGap = std::max(32.0, 4.0 * std::max(word.fontSize, segment.fontSize));
+                if (gap > splitGap) {
+                    splitLines.push_back(std::move(segment));
+                    segment = TextLineGroup {};
+                }
+            }
+            segment.words.push_back(word);
+            updateLineGeometry(&segment);
+        }
+        if (!segment.words.empty()) {
+            splitLines.push_back(std::move(segment));
+        }
+    }
+    lines = std::move(splitLines);
+    std::sort(lines.begin(), lines.end(), [](const TextLineGroup &a, const TextLineGroup &b) { return a.centerY == b.centerY ? a.x0 < b.x0 : a.centerY < b.centerY; });
+
+    // Grow independent vertical chains. A line continues a paragraph only
+    // when it is close to, and horizontally aligned with, that paragraph's
+    // previous line. This keeps columns, headers, captions, and display labels
+    // separate while allowing indentation in ordinary prose.
+    std::vector<ParagraphGroup> paragraphs;
+    for (TextLineGroup &line : lines) {
+        std::size_t best = paragraphs.size();
+        double bestGap = 1e100;
+        for (std::size_t i = 0; i < paragraphs.size(); ++i) {
+            const TextLineGroup &previous = paragraphs[i].lines.back();
+            const double centerGap = line.centerY - previous.centerY;
+            const double maxGap = 1.9 * std::max(line.fontSize, previous.fontSize);
+            if (centerGap <= 0 || centerGap > maxGap) {
+                continue;
+            }
+            const double overlap = std::max(0.0, std::min(line.x1, previous.x1) - std::max(line.x0, previous.x0));
+            const double shorterWidth = std::max(1.0, std::min(line.x1 - line.x0, previous.x1 - previous.x0));
+            const bool aligned = overlap / shorterWidth >= 0.2 || std::abs(line.x0 - previous.x0) <= 2.2 * std::max(line.fontSize, previous.fontSize);
+            if (aligned && centerGap < bestGap) {
+                best = i;
+                bestGap = centerGap;
+            }
+        }
+        if (best == paragraphs.size()) {
+            ParagraphGroup paragraph;
+            paragraph.x0 = line.x0;
+            paragraph.y0 = line.y0;
+            paragraph.x1 = line.x1;
+            paragraph.y1 = line.y1;
+            paragraph.lines.push_back(std::move(line));
+            paragraphs.push_back(std::move(paragraph));
+        } else {
+            ParagraphGroup &paragraph = paragraphs[best];
+            paragraph.x0 = std::min(paragraph.x0, line.x0);
+            paragraph.y0 = std::min(paragraph.y0, line.y0);
+            paragraph.x1 = std::max(paragraph.x1, line.x1);
+            paragraph.y1 = std::max(paragraph.y1, line.y1);
+            paragraph.lines.push_back(std::move(line));
+        }
+    }
+    std::sort(paragraphs.begin(), paragraphs.end(), [](const ParagraphGroup &a, const ParagraphGroup &b) {
+        const long aRow = std::lround(a.y0 / 4.0);
+        const long bRow = std::lround(b.y0 / 4.0);
+        return aRow == bRow ? a.x0 < b.x0 : aRow < bRow;
+    });
+    return paragraphs;
 }
 
 std::string base64Decode(std::string_view input)
@@ -521,6 +820,7 @@ std::string makePageHtml(PDFDoc *doc, int page, double resolution, std::string_v
     HtmlTextOutputDev textOutput;
     doc->displayPage(&textOutput, page, resolution, resolution, 0, true, false, false);
     const auto words = textOutput.makeWordList();
+    const std::vector<ParagraphGroup> paragraphs = groupParagraphs(*words);
     const double scale = resolution / 72.0;
     const int width = static_cast<int>(std::ceil(doc->getPageMediaWidth(page) * scale));
     const int height = static_cast<int>(std::ceil(doc->getPageMediaHeight(page) * scale));
@@ -534,20 +834,30 @@ std::string makePageHtml(PDFDoc *doc, int page, double resolution, std::string_v
          << "</head><body><main class=\"page\" style=\"width:" << width << "px;height:" << height << "px\">"
          << "<div class=\"background\" aria-hidden=\"true\">" << svg << "</div>"
          << "<div class=\"text-layer\" aria-label=\"PDF text\">";
-    for (const TextWord *word : words->getWords()) {
-        const std::unique_ptr<std::string> text = word->getText();
-        if (!text || text->empty()) {
-            continue;
+    for (std::size_t paragraphIndex = 0; paragraphIndex < paragraphs.size(); ++paragraphIndex) {
+        const ParagraphGroup &paragraph = paragraphs[paragraphIndex];
+        html << "<p class=\"paragraph\" data-paragraph=\"" << paragraphIndex << "\" style=\"left:" << paragraph.x0 << "px;top:" << paragraph.y0 << "px;width:" << std::max(0.0, paragraph.x1 - paragraph.x0) << "px;height:"
+             << std::max(0.0, paragraph.y1 - paragraph.y0) << "px;\">";
+        for (std::size_t lineIndex = 0; lineIndex < paragraph.lines.size(); ++lineIndex) {
+            const TextLineGroup &line = paragraph.lines[lineIndex];
+            const double bandTop = lineIndex == 0 ? paragraph.y0 : (paragraph.lines[lineIndex - 1].y1 + line.y0) * 0.5;
+            const double bandBottom = lineIndex + 1 == paragraph.lines.size() ? paragraph.y1 : (line.y1 + paragraph.lines[lineIndex + 1].y0) * 0.5;
+            html << "<span class=\"line\" data-line=\"" << lineIndex << "\" style=\"left:" << line.x0 - paragraph.x0 << "px;top:" << bandTop - paragraph.y0 << "px;width:" << std::max(0.0, line.x1 - line.x0) << "px;height:" << std::max(0.0, bandBottom - bandTop) << "px;\">";
+            for (const PositionedWord &positioned : line.words) {
+                const TextWord *word = positioned.word;
+                const std::unique_ptr<std::string> text = word->getText();
+                double red, green, blue;
+                word->getColor(&red, &green, &blue);
+                html << "<span class=\"word " << fontClasses(word) << "\" style=\"left:" << positioned.x0 - line.x0 << "px;top:" << positioned.y0 - bandTop << "px;width:" << std::max(0.0, positioned.x1 - positioned.x0) << "px;height:"
+                     << std::max(0.0, positioned.y1 - positioned.y0) << "px;font-size:" << positioned.fontSize << "px;color:rgb(" << std::lround(red * 255) << ',' << std::lround(green * 255) << ',' << std::lround(blue * 255) << ");";
+                if (word->getRotation()) {
+                    html << "--rotation:" << word->getRotation() * 90 << "deg;";
+                }
+                html << "\">" << htmlEscape(*text) << "</span>";
+            }
+            html << "</span>";
         }
-        double x0, y0, x1, y1, red, green, blue;
-        word->getBBox(&x0, &y0, &x1, &y1);
-        word->getColor(&red, &green, &blue);
-        html << "<span class=\"word " << fontClasses(word) << "\" style=\"left:" << x0 << "px;top:" << y0 << "px;width:" << std::max(0.0, x1 - x0) << "px;height:" << std::max(0.0, y1 - y0)
-             << "px;font-size:" << word->getFontSize() << "px;color:rgb(" << std::lround(red * 255) << ',' << std::lround(green * 255) << ',' << std::lround(blue * 255) << ");";
-        if (word->getRotation()) {
-            html << "--rotation:" << word->getRotation() * 90 << "deg;";
-        }
-        html << "\">" << htmlEscape(*text) << "</span>";
+        html << "</p>";
     }
     html << "</div></main></body></html>";
     return html.str();
@@ -604,7 +914,7 @@ void normalizeSvgIds(std::string *svg, int page)
     *svg = std::move(normalized);
 }
 
-constexpr std::string_view styleSheet = R"CSS(*{box-sizing:border-box}html,body{margin:0;background:#555}.page{position:relative;overflow:hidden;background:#fff}.background,.text-layer{position:absolute;inset:0;width:100%;height:100%}.background{display:block;pointer-events:none}.background>svg{display:block;width:100%;height:100%}.text-layer{pointer-events:none}.word{position:absolute;display:block;white-space:pre;line-height:1;transform-origin:0 0;transform:rotate(var(--rotation,0deg)) scaleX(var(--fit-x,1));pointer-events:auto;user-select:text}.f-sans{font-family:Arial,"Helvetica Neue",sans-serif}.f-serif{font-family:"Times New Roman",Times,serif}.f-mono{font-family:Consolas,"Liberation Mono",monospace}.fw-bold{font-weight:700}.fs-italic{font-style:italic}body.bundle-index{padding:1rem}.bundle-index iframe{display:block;margin:0 auto 1rem;border:0;background:#fff;box-shadow:0 2px 10px #222})CSS";
+constexpr std::string_view styleSheet = R"CSS(*{box-sizing:border-box}html,body{margin:0;background:#555}.page{position:relative;overflow:hidden;background:#fff}.background,.text-layer{position:absolute;inset:0;width:100%;height:100%}.background{display:block}.background>svg{display:block;width:100%;height:100%}.paragraph,.line,.word{position:absolute}.paragraph{display:block;margin:0}.line{display:block}.word{display:block;white-space:pre;line-height:1;transform-origin:0 0;transform:rotate(var(--rotation,0deg)) scaleX(var(--fit-x,1))}.f-sans{font-family:Arial,"Helvetica Neue",sans-serif}.f-serif{font-family:"Times New Roman",Times,serif}.f-mono{font-family:Consolas,"Liberation Mono",monospace}.f-math{font-family:"STIX Two Text",Cambria,"Times New Roman",serif}.f-math-symbol{font-family:"STIX Two Math","Cambria Math","Latin Modern Math","Noto Sans Math",serif;font-style:normal}.pdf-glyph{color:transparent!important}.fw-bold{font-weight:700}.fs-italic{font-style:italic}body.bundle-index{padding:1rem}.bundle-index iframe{display:block;margin:0 auto 1rem;border:0;background:#fff;box-shadow:0 2px 10px #222})CSS";
 
 constexpr std::string_view fitScript = R"JS((()=>{const fit=()=>{for(const word of document.querySelectorAll('.word')){const target=Number.parseFloat(word.style.width);if(!(target>0)||!word.textContent||word.textContent.length<2)continue;word.style.transform='none';const range=document.createRange();range.selectNodeContents(word);const natural=range.getBoundingClientRect().width;word.style.removeProperty('transform');if(natural>0){const ratio=Math.max(.5,Math.min(2,target/natural));word.style.setProperty('--fit-x',String(ratio))}}};if(document.fonts&&document.fonts.ready){document.fonts.ready.then(fit)}else if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',fit,{once:true})}else{fit()}})();)JS";
 
@@ -668,7 +978,11 @@ int main(int argc, char **argv)
         return 2;
     }
 
-    globalParams = std::make_unique<GlobalParams>();
+    const std::optional<std::string> popplerDataDir = bundledPopplerDataDir(argv[0]);
+    if (!popplerDataDir) {
+        return 1;
+    }
+    globalParams = std::make_unique<GlobalParams>(*popplerDataDir);
     globalParams->setTextEncoding("UTF-8");
     const GooString input(options.input);
     std::unique_ptr<PDFDoc> document = PDFDocFactory().createPDFDoc(input, options.ownerPassword, options.userPassword);

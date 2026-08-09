@@ -30,13 +30,14 @@ jobs:
         run: >-
           sudo apt-get update && sudo apt-get install -y
           cmake ninja-build g++ libcairo2-dev libfontconfig1-dev libfreetype-dev
-          libjpeg-dev libwebp-dev libzstd-dev zlib1g-dev
+          libjpeg-turbo8-dev libopenjp2-7-dev libwebp-dev libzstd-dev zlib1g-dev
+          poppler-data
       - name: Configure
         run: >-
           cmake -S . -B build -G Ninja
           -DCMAKE_BUILD_TYPE=Release
           -DENABLE_CPP=OFF -DENABLE_GLIB=OFF -DENABLE_QT5=OFF -DENABLE_QT6=OFF
-          -DENABLE_BOOST=OFF -DENABLE_LIBOPENJPEG=OFF -DENABLE_LIBJPEG=OFF
+          -DENABLE_BOOST=OFF -DENABLE_LIBOPENJPEG=ON -DENABLE_LIBJPEG=ON
           -DENABLE_LCMS=OFF -DENABLE_LIBCURL=OFF -DENABLE_LIBTIFF=OFF
           -DENABLE_NSS3=OFF -DENABLE_GPGME=OFF -DBUILD_SHARED_LIBS=OFF
           -DBUILD_CPP_TESTS=OFF -DBUILD_MANUAL_TESTS=OFF
@@ -45,14 +46,21 @@ jobs:
       - name: Package pdfrender
         run: |
           package=pdfrender-linux-debian-x86_64
-          mkdir -p "dist/$package"
+          mkdir -p "dist/$package/share" "dist/$package/licenses/poppler-data"
           install -m 0755 build/utils/pdfrender "dist/$package/"
           strip --strip-unneeded "dist/$package/pdfrender"
+          cp -a /usr/share/poppler "dist/$package/share/"
+          install -m 0644 /usr/share/doc/poppler-data/copyright \
+            "dist/$package/licenses/poppler-data/"
           install -m 0644 \
             examples/pdfrender-bundle-parser.mjs \
             utils/pdfrender.md \
             COPYING COPYING3 \
             "dist/$package/"
+          test -f "dist/$package/share/poppler/cidToUnicode/Adobe-GB1"
+          test -f "dist/$package/share/poppler/cMap/Adobe-GB1/Adobe-GB1-UCS2"
+          ldd "dist/$package/pdfrender" | grep -q 'libjpeg\.so'
+          ldd "dist/$package/pdfrender" | grep -q 'libopenjp2\.so'
           tar -C dist -czf "dist/$package.tar.gz" "$package"
       - name: Upload pdfrender artifact
         uses: actions/upload-artifact@v6
@@ -70,14 +78,15 @@ jobs:
           dnf install -y
           git tar gzip coreutils binutils
           cmake ninja-build gcc-c++ cairo-devel fontconfig-devel freetype-devel
-          libjpeg-turbo-devel libwebp-devel libzstd-devel zlib-ng-compat-devel
+          libjpeg-turbo-devel openjpeg-devel libwebp-devel libzstd-devel
+          zlib-ng-compat-devel poppler-data
       - uses: actions/checkout@v7
       - name: Configure
         run: >-
           cmake -S . -B build -G Ninja
           -DCMAKE_BUILD_TYPE=Release
           -DENABLE_CPP=OFF -DENABLE_GLIB=OFF -DENABLE_QT5=OFF -DENABLE_QT6=OFF
-          -DENABLE_BOOST=OFF -DENABLE_LIBOPENJPEG=OFF -DENABLE_LIBJPEG=OFF
+          -DENABLE_BOOST=OFF -DENABLE_LIBOPENJPEG=ON -DENABLE_LIBJPEG=ON
           -DENABLE_LCMS=OFF -DENABLE_LIBCURL=OFF -DENABLE_LIBTIFF=OFF
           -DENABLE_NSS3=OFF -DENABLE_GPGME=OFF -DBUILD_SHARED_LIBS=OFF
           -DBUILD_CPP_TESTS=OFF -DBUILD_MANUAL_TESTS=OFF
@@ -86,14 +95,21 @@ jobs:
       - name: Package pdfrender
         run: |
           package=pdfrender-linux-redhat-x86_64
-          mkdir -p "dist/$package"
+          mkdir -p "dist/$package/share" "dist/$package/licenses/poppler-data"
           install -m 0755 build/utils/pdfrender "dist/$package/"
           strip --strip-unneeded "dist/$package/pdfrender"
+          cp -a /usr/share/poppler "dist/$package/share/"
+          cp -a /usr/share/licenses/poppler-data/. \
+            "dist/$package/licenses/poppler-data/"
           install -m 0644 \
             examples/pdfrender-bundle-parser.mjs \
             utils/pdfrender.md \
             COPYING COPYING3 \
             "dist/$package/"
+          test -f "dist/$package/share/poppler/cidToUnicode/Adobe-GB1"
+          test -f "dist/$package/share/poppler/cMap/Adobe-GB1/Adobe-GB1-UCS2"
+          ldd "dist/$package/pdfrender" | grep -q 'libjpeg\.so'
+          ldd "dist/$package/pdfrender" | grep -q 'libopenjp2\.so'
           tar -C dist -czf "dist/$package.tar.gz" "$package"
       - name: Upload pdfrender artifact
         uses: actions/upload-artifact@v6
@@ -121,6 +137,8 @@ jobs:
             mingw-w64-ucrt-x86_64-cairo
             mingw-w64-ucrt-x86_64-freetype
             mingw-w64-ucrt-x86_64-libjpeg-turbo
+            mingw-w64-ucrt-x86_64-openjpeg2
+            mingw-w64-ucrt-x86_64-poppler-data
             mingw-w64-ucrt-x86_64-libwebp
             mingw-w64-ucrt-x86_64-zlib
             mingw-w64-ucrt-x86_64-zstd
@@ -129,7 +147,7 @@ jobs:
           cmake -S . -B build -G Ninja -DFONT_CONFIGURATION=win32
           -DCMAKE_BUILD_TYPE=Release
           -DENABLE_CPP=OFF -DENABLE_GLIB=OFF -DENABLE_QT5=OFF -DENABLE_QT6=OFF
-          -DENABLE_BOOST=OFF -DENABLE_LIBOPENJPEG=OFF -DENABLE_LIBJPEG=OFF
+          -DENABLE_BOOST=OFF -DENABLE_LIBOPENJPEG=ON -DENABLE_LIBJPEG=ON
           -DENABLE_LCMS=OFF -DENABLE_LIBCURL=OFF -DENABLE_LIBTIFF=OFF
           -DENABLE_NSS3=OFF -DENABLE_GPGME=OFF -DBUILD_SHARED_LIBS=OFF
           -DBUILD_CPP_TESTS=OFF -DBUILD_MANUAL_TESTS=OFF
@@ -138,9 +156,12 @@ jobs:
       - name: Package pdfrender
         run: |
           package=pdfrender-windows-x86_64
-          mkdir -p "dist/$package"
+          mkdir -p "dist/$package/share" "dist/$package/licenses"
           cp build/utils/pdfrender.exe "dist/$package/"
           strip --strip-unneeded "dist/$package/pdfrender.exe"
+          cp -a /ucrt64/share/poppler "dist/$package/share/"
+          cp -a /ucrt64/share/licenses/poppler-data \
+            "dist/$package/licenses/"
           ldd build/utils/pdfrender.exe \
             | awk '$3 ~ /^\/ucrt64\/bin\// { print $3 }' \
             > dist/runtime-dlls.txt
@@ -153,6 +174,10 @@ jobs:
             utils/pdfrender.md \
             COPYING COPYING3 \
             "dist/$package/"
+          test -f "dist/$package/share/poppler/cidToUnicode/Adobe-GB1"
+          test -f "dist/$package/share/poppler/cMap/Adobe-GB1/Adobe-GB1-UCS2"
+          grep -Ei 'libjpeg[^/]*\.dll' dist/runtime-dlls.txt
+          grep -Ei 'libopenjp2[^/]*\.dll' dist/runtime-dlls.txt
           cd dist
           cmake -E tar cf "$package.zip" --format=zip "$package"
       - name: Upload pdfrender artifact
