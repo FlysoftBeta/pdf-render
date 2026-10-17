@@ -815,7 +815,7 @@ bool renderSvg(PDFDoc *doc, BackgroundOutputDev *output, int page, double resolu
     return true;
 }
 
-std::string makePageHtml(PDFDoc *doc, int page, double resolution, std::string_view cssId, std::string_view scriptId, std::string_view svg)
+std::string makePageHtml(PDFDoc *doc, int page, double resolution, std::string_view svg)
 {
     HtmlTextOutputDev textOutput;
     doc->displayPage(&textOutput, page, resolution, resolution, 0, true, false, false);
@@ -827,11 +827,7 @@ std::string makePageHtml(PDFDoc *doc, int page, double resolution, std::string_v
 
     std::ostringstream html;
     html << std::fixed << std::setprecision(3);
-    html << "<!doctype html><html><head><meta charset=\"utf-8\">"
-         << "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-         << "<link rel=\"stylesheet\" href=\"" << cssId << "\" data-bundle-ref=\"" << cssId << "\" data-bundle-mime=\"text/css\">"
-         << "<script defer src=\"" << scriptId << "\" data-bundle-ref=\"" << scriptId << "\" data-bundle-mime=\"text/javascript\"></script>"
-         << "</head><body><main class=\"page\" style=\"width:" << width << "px;height:" << height << "px\">"
+    html << "<main class=\"page\" style=\"width:" << width << "px;height:" << height << "px\">"
          << "<div class=\"background\" aria-hidden=\"true\">" << svg << "</div>"
          << "<div class=\"text-layer\" aria-label=\"PDF text\">";
     for (std::size_t paragraphIndex = 0; paragraphIndex < paragraphs.size(); ++paragraphIndex) {
@@ -859,7 +855,7 @@ std::string makePageHtml(PDFDoc *doc, int page, double resolution, std::string_v
         }
         html << "</p>";
     }
-    html << "</div></main></body></html>";
+    html << "</div></main>";
     return html.str();
 }
 
@@ -914,9 +910,8 @@ void normalizeSvgIds(std::string *svg, int page)
     *svg = std::move(normalized);
 }
 
-constexpr std::string_view styleSheet = R"CSS(*{box-sizing:border-box}html,body{margin:0;background:#555}.page{position:relative;overflow:hidden;background:#fff}.background,.text-layer{position:absolute;inset:0;width:100%;height:100%}.background{display:block}.background>svg{display:block;width:100%;height:100%}.paragraph,.line,.word{position:absolute}.paragraph{display:block;margin:0}.line{display:block}.word{display:block;white-space:pre;line-height:1;transform-origin:0 0;transform:rotate(var(--rotation,0deg)) scaleX(var(--fit-x,1))}.f-sans{font-family:Arial,"Helvetica Neue",sans-serif}.f-serif{font-family:"Times New Roman",Times,serif}.f-mono{font-family:Consolas,"Liberation Mono",monospace}.f-math{font-family:"STIX Two Text",Cambria,"Times New Roman",serif}.f-math-symbol{font-family:"STIX Two Math","Cambria Math","Latin Modern Math","Noto Sans Math",serif;font-style:normal}.pdf-glyph{color:transparent!important}.fw-bold{font-weight:700}.fs-italic{font-style:italic}body.bundle-index{padding:1rem}.bundle-index iframe{display:block;margin:0 auto 1rem;border:0;background:#fff;box-shadow:0 2px 10px #222})CSS";
+constexpr std::string_view styleSheet = R"CSS(*{box-sizing:border-box}.page{position:relative;overflow:hidden;background:#fff}.background,.text-layer{position:absolute;top:0;left:0;width:100%;height:100%}.background{display:block}.background>svg{display:block;width:100%;height:100%}.paragraph,.line,.word{position:absolute}.paragraph{display:block;margin:0}.line{display:block}.word{display:block;white-space:pre;line-height:1;transform-origin:0 0;transform:rotate(var(--rotation,0deg)) scaleX(var(--fit-x,1))}.f-sans{font-family:Arial,"Helvetica Neue",sans-serif}.f-serif{font-family:"Times New Roman",Times,serif}.f-mono{font-family:Consolas,"Liberation Mono",monospace}.f-math{font-family:"STIX Two Text",Cambria,"Times New Roman",serif}.f-math-symbol{font-family:"STIX Two Math","Cambria Math","Latin Modern Math","Noto Sans Math",serif;font-style:normal}.pdf-glyph{color:transparent!important}.fw-bold{font-weight:700}.fs-italic{font-style:italic})CSS";
 
-constexpr std::string_view fitScript = R"JS((()=>{const fit=()=>{for(const word of document.querySelectorAll('.word')){const target=Number.parseFloat(word.style.width);if(!(target>0)||!word.textContent||word.textContent.length<2)continue;word.style.transform='none';const range=document.createRange();range.selectNodeContents(word);const natural=range.getBoundingClientRect().width;word.style.removeProperty('transform');if(natural>0){const ratio=Math.max(.5,Math.min(2,target/natural));word.style.setProperty('--fit-x',String(ratio))}}};if(document.fonts&&document.fonts.ready){document.fonts.ready.then(fit)}else if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',fit,{once:true})}else{fit()}})();)JS";
 
 struct PageResult
 {
@@ -925,7 +920,7 @@ struct PageResult
     std::string error;
 };
 
-bool renderPage(PDFDoc *document, BackgroundOutputDev *background, int page, const Options &options, std::string_view cssId, std::string_view scriptId, PageResult *result)
+bool renderPage(PDFDoc *document, BackgroundOutputDev *background, int page, const Options &options, PageResult *result)
 {
     std::string svg;
     if (!renderSvg(document, background, page, options.resolution, &svg, &result->error) || !extractDataUris(&svg, page, &result->assets, options.webpQuality, &result->error)) {
@@ -938,7 +933,7 @@ bool renderPage(PDFDoc *document, BackgroundOutputDev *background, int page, con
     }
     svg.erase(0, root);
     normalizeSvgIds(&svg, page);
-    result->html = makePageHtml(document, page, options.resolution, cssId, scriptId, svg);
+    result->html = makePageHtml(document, page, options.resolution, svg);
     return true;
 }
 
@@ -1004,8 +999,7 @@ int main(int argc, char **argv)
 
     PdfRenderBundle bundle;
     const std::string cssId = bundle.addText("style.css", "text/css", std::string(styleSheet));
-    const std::string scriptId = bundle.addText("pdfrender.js", "text/javascript", std::string(fitScript));
-    if (cssId.empty() || scriptId.empty()) {
+    if (cssId.empty()) {
         std::cerr << "cannot spool shared render resources\n";
         return 1;
     }
@@ -1048,7 +1042,7 @@ int main(int argc, char **argv)
             }
             const int page = first + resultIndex;
             PageResult result;
-            if (!renderPage(workerDocument.get(), &background, page, options, cssId, scriptId, &result)) {
+            if (!renderPage(workerDocument.get(), &background, page, options, &result)) {
                 std::scoped_lock lock(failureMutex);
                 if (workerFailure.empty()) {
                     workerFailure = "page " + std::to_string(page) + ": " + result.error;
@@ -1090,12 +1084,12 @@ int main(int argc, char **argv)
     std::ostringstream manifest;
     manifest << "{\"layout\":\"fixed\",\"sourceMime\":\"application/pdf\",\"sourcePages\":" << pageCount
              << ",\"firstPage\":" << first << ",\"lastPage\":" << last << ",\"resolution\":" << options.resolution
-             << ",\"webpQuality\":" << options.webpQuality << ",\"shared\":[\"" << cssId << "\",\"" << scriptId << "\"],\"items\":[";
+             << ",\"webpQuality\":" << options.webpQuality << ",\"shared\":[\"" << cssId << "\"],\"items\":[";
     for (std::size_t index = 0; index < pages.size(); ++index) {
         const auto &page = pages[index];
         if (index) manifest << ',';
         manifest << "{\"id\":\"page:" << page.page << "\",\"ordinal\":" << index << ",\"width\":" << page.width
-                 << ",\"height\":" << page.height << ",\"document\":\"" << page.htmlId << "\",\"dependencies\":[\"" << cssId << "\",\"" << scriptId << '"';
+                 << ",\"height\":" << page.height << ",\"document\":\"" << page.htmlId << "\",\"dependencies\":[\"" << cssId << '"';
         for (const auto &dependency : page.dependencies) {
             manifest << ",\"" << dependency << '"';
         }

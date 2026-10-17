@@ -87,7 +87,7 @@ On RHEL-compatible distributions, use `zlib` instead of `zlib-ng-compat`.
 Install suitable system fonts when PDFs may rely on unembedded
 or fallback fonts.
 
-## Archive format, version 1
+## Archive format, version 2
 
 A page is HTML positioned text over a Cairo SVG background; PNG/JPEG assets
 are converted to WebP. Ordinary PDF text is excluded from the SVG and
@@ -120,7 +120,7 @@ names are UTF-8. Implementations must reject duplicate, absolute, parent
 
 ### Manifest
 
-The manifest has `format: "classapp-render-archive"` and `version: 1`.
+The manifest has `format: "classapp-render-archive"` and `version: 2`.
 
 - `dictionary` is null or contains `contentId`, `path`, `size`, and
   `storedOffset`.
@@ -138,9 +138,22 @@ The fixed-layout `document` contains `sourceMime`, `shared`, and ordered
 `items`. Each item has a stable `id`, zero-based `ordinal`, intrinsic `width`
 and `height`, one HTML `document` content ID, and its `dependencies`.
 
-HTML external references use `data-bundle-ref="<contentId>"` alongside a
-`src` or `href`. A consumer resolves these references to local files or Blob
-URLs. Rendering should occur in a sandboxed iframe with a restrictive CSP.
+A page `document` is an HTML fragment: exactly one
+`<main class="page" style="width:Wpx;height:Hpx">` element holding the
+background SVG and the text layer, with no doctype, `html`, `head`, `meta`,
+`link` or `script`. There is no script resource. `document.shared` and every
+item's `dependencies` list the single `text/css` stylesheet first; the consumer
+inlines it into the root the page is mounted in (for example a shadow root).
+The stylesheet holds only page rules (no `html`/`body` rules and no `inset`).
+Fitting word widths is the consumer's job: for each `.word` of two or more
+characters with a positive `style.width`, set `--fit-x` to the target width
+divided by the natural text width, clamped to 0.5-2.
+
+Images are referenced only from SVG `<image xlink:href data-bundle-ref
+data-bundle-mime>` elements inside `<defs>` and drawn with
+`<use xlink:href="#pdfrender-pN-M">`. A consumer resolves `data-bundle-ref`
+references to local files or Blob URLs, keeps same-page `#id` references and
+removes every other URL, and should apply a restrictive CSP.
 
 Text resources use Zstandard level 8. When enough samples exist, pdfrender
 trains a standard dictionary capped at 64 KiB and all text frames use it.

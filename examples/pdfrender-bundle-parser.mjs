@@ -34,7 +34,7 @@ function parseArchive(buffer) {
   const manifest = JSON.parse(Buffer.from(manifestBytes).toString("utf8"));
   if (
     manifest.format !== "classapp-render-archive" ||
-    manifest.version !== 1 ||
+    manifest.version !== 2 ||
     !Array.isArray(manifest.resources) ||
     !Array.isArray(manifest.files)
   ) {

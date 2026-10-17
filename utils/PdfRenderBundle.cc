@@ -494,7 +494,7 @@ bool PdfRenderBundle::write(const std::filesystem::path &path, std::string *erro
     paths << ']';
 
     std::ostringstream manifest;
-    manifest << "{\"format\":\"classapp-render-archive\",\"version\":1,\"dictionary\":";
+    manifest << "{\"format\":\"classapp-render-archive\",\"version\":2,\"dictionary\":";
     if (dictionary.empty()) {
         manifest << "null";
     } else {
